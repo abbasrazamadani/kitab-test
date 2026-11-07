@@ -1,0 +1,97 @@
+name: kitab-windows-test
+
+# Manual run only. Input: direct link to the full app zip (KitabDownloader.zip) attached to a Release.
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct link to the app zip"
+        required: true
+        type: string
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-11-arm]
+        mark: ["with-mark", "no-mark"]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - name: Download and extract the zip (Expand-Archive adds no download mark)
+        shell: powershell
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force results | Out-Null
+          Invoke-WebRequest -Uri $env:ZIP_URL -OutFile app.zip
+          Expand-Archive -Path app.zip -DestinationPath app -Force
+          $exe = Get-ChildItem -Path app -Recurse -Filter KitabDownloader.exe | Select-Object -First 1
+          "EXE: $($exe.FullName)" | Out-File results\info.txt
+          Add-Content -Path $env:GITHUB_ENV -Value "EXE_PATH=$($exe.FullName)"
+          Add-Content -Path $env:GITHUB_ENV -Value "APP_DIR=$($exe.DirectoryName)"
+
+      - name: Add the download mark to EVERY file (what Explorer does for a downloaded zip)
+        if: matrix.mark == 'with-mark'
+        shell: powershell
+        run: |
+          Get-ChildItem -Path $env:APP_DIR -Recurse -File | ForEach-Object {
+            Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'
+          }
+
+      - name: Install the WebView2 runtime if it is missing
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $k = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          if (-not (Test-Path $k)) {
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile wv2.exe
+            Start-Process -FilePath .\wv2.exe -ArgumentList '/silent','/install' -Wait
+          }
+          "WebView2 key present: $(Test-Path $k)" | Out-File results\info.txt -Append
+
+      - name: Computer facts
+        shell: powershell
+        run: |
+          "OS: $((Get-CimInstance Win32_OperatingSystem).Caption) $((Get-CimInstance Win32_OperatingSystem).Version)" | Out-File results\info.txt -Append
+          "Arch: $env:PROCESSOR_ARCHITECTURE" | Out-File results\info.txt -Append
+          ".NET Framework release: $((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full').Release)" | Out-File results\info.txt -Append
+          cmd /c "dir /r `"$env:APP_DIR\_internal\pythonnet\runtime\Python.Runtime.dll`"" | Out-File results\info.txt -Append
+
+      - name: Start the app, wait, collect results
+        shell: powershell
+        run: |
+          $start = Get-Date
+          $p = Start-Process -FilePath $env:EXE_PATH -WorkingDirectory $env:APP_DIR -PassThru
+          Start-Sleep -Seconds 80
+          "Process still running after 80 s: $(-not $p.HasExited)" | Out-File results\info.txt -Append
+          try {
+            Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("results\screen.png")
+          } catch { "screenshot failed: $($_.Exception.Message)" | Out-File results\info.txt -Append }
+          $logs = Join-Path $env:LOCALAPPDATA 'KitabDownloader\logs'
+          foreach ($f in 'app.log','startup_error.log') {
+            $src = Join-Path $logs $f
+            if (Test-Path $src) { Copy-Item $src "results\$f.txt" } else { "no $f" | Out-File results\info.txt -Append }
+          }
+          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$start} -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderName -in '.NET Runtime','Application Error','Application Hang','SideBySide' } |
+            Format-List TimeCreated,ProviderName,Message | Out-File results\events.txt
+          $ok = (Test-Path results\app.log.txt) -and ((Get-Content results\app.log.txt -Raw) -match 'page loaded')
+          "RESULT: window page loaded = $ok" | Out-File results\info.txt -Append
+          Get-Content results\info.txt
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.os }}-${{ matrix.mark }}
+          path: results/
