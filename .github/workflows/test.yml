@@ -38,7 +38,9 @@ jobs:
         if: matrix.mark == 'with-mark'
         shell: powershell
         run: |
-          Get-ChildItem -Path $env:APP_DIR -Recurse -File | ForEach-Object {
+          # The exe itself is NOT marked: a marked exe started by script shows an invisible
+          # "Open File - Security Warning" box on Server editions and the step hangs. Real users click it.
+          Get-ChildItem -Path $env:APP_DIR -Recurse -File | Where-Object { $_.Name -ne 'KitabDownloader.exe' } | ForEach-Object {
             Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value '[ZoneTransfer]','ZoneId=3'
           }
 
@@ -67,7 +69,13 @@ jobs:
         timeout-minutes: 6
         run: |
           $start = Get-Date
-          $p = Start-Process -FilePath $env:EXE_PATH -WorkingDirectory $env:APP_DIR -PassThru
+          "about to start the app (CreateProcess, no shell prompt)" | Out-File results\info.txt -Append
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $env:EXE_PATH
+          $psi.WorkingDirectory = $env:APP_DIR
+          $psi.UseShellExecute = $false
+          $p = [System.Diagnostics.Process]::Start($psi)
+          "app started, pid $($p.Id)" | Out-File results\info.txt -Append
           Start-Sleep -Seconds 80
           "Process still running after 80 s: $(-not $p.HasExited)" | Out-File results\info.txt -Append
           try {
