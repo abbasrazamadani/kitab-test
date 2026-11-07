@@ -18,6 +18,7 @@ jobs:
         mark: ["with-mark", "no-mark"]
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    timeout-minutes: 12
     steps:
       - name: Download and extract the zip (Expand-Archive adds no download mark)
         shell: powershell
@@ -63,6 +64,7 @@ jobs:
 
       - name: Start the app, wait, collect results
         shell: powershell
+        timeout-minutes: 6
         run: |
           $start = Get-Date
           $p = Start-Process -FilePath $env:EXE_PATH -WorkingDirectory $env:APP_DIR -PassThru
